@@ -8,27 +8,77 @@ from torchvision.datasets import CIFAR10
 import torch
 from torch.utils.data import DataLoader
 import torchvision.transforms as transforms
+import copy
 # from data.Mnist.multi_mnist_loader import MNIST
+
+### transformer 用于get_dataset中的transform ###
+class TransformsSimCLR:
+    """
+    一种随机数据扩充模块，它对任意给定的数据实例进行随机转换，
+    得到同一实例的两个相关视图，
+    记为x̃i和x̃j，我们认为这是一个正对。
+    """
+
+    def __init__(self, size, train=True):
+        """
+        :param size:图片尺寸
+        """
+        s = 1
+        color_jitter = torchvision.transforms.ColorJitter(
+            0.8 * s, 0.8 * s, 0.8 * s, 0.2 * s
+        )
+        self.train_transform = torchvision.transforms.Compose(
+            [
+                torchvision.transforms.RandomResizedCrop(size=size),
+                torchvision.transforms.RandomHorizontalFlip(),  # with 0.5 probability
+                torchvision.transforms.RandomApply([color_jitter], p=0.8),
+                torchvision.transforms.RandomGrayscale(p=0.2),
+                torchvision.transforms.ToTensor(),
+            ]
+        )
+
+        self.test_transform = torchvision.transforms.Compose(
+            [
+                torchvision.transforms.Resize(size=size),
+                torchvision.transforms.ToTensor(),
+            ]
+        )
+        self.train = train
+
+    def __call__(self, x):
+        """
+        :param x: 图片
+        :return: x̃i和x̃j
+        """
+
+        if self.train:
+            return self.train_transform(x), self.train_transform(x)
+        else:
+            return self.test_transform(x)
+### transformer end ###
+
 
 random.seed(42)
 np.random.seed(42)
 
-def rearrange_data_by_class(data, targets, n_class):
+def rearrange_data_by_class(data1, data2, targets, n_class):
     new_data = []
     for i in trange(n_class):
         # idx = targets[0] == i
         idx = targets == i
-        new_data.append(data[idx])
-    return new_data
+        new_data1.append(data1[idx])
+        new_data2.append(data2[idx])
+    return new_data1, new_data2
 
 def get_dataset(mode='train'):
     # transform = transforms.Compose(
     #    [transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))])
 
-    transform = transforms.Compose(
-        [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]) #CIFAR10
+    #transform = transforms.Compose(
+    #    [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]) #CIFAR10 原transform
 
-    dataset = CIFAR10(root='./data', train=True if mode=='train' else False, download=True, transform=transform)
+    dataset = CIFAR10(root='./data', train=True if mode=='train' else False, download=True, transform=TransformsSimCLR(size=56)) #size为可调参数
+    
     # dataset = MNIST(root='.', train=True, download=True, transform=transform, multi=True)
     n_sample = len(dataset.data)
     # print('n_sample:', n_sample)
@@ -37,36 +87,26 @@ def get_dataset(mode='train'):
     # full batch
     trainloader = DataLoader(dataset, batch_size=n_sample, shuffle=False)
 
+    dataset_data1 = copy.deepcopy(dataset.data)
+    dataset_data2 = copy.deepcopy(dataset.data)
+
     print("Loading data from storage ...")
     for xy in trainloader:
-        dataset.data, dataset.targets = xy
+        dataset_data1, dataset_data2, dataset.targets = xy
         # mdata, target, targets = xy
 
-    # # dataset.targets = [original_targets, target_0, ..., target_9]
-    # target = target[0].cpu().detach().numpy()
-    # for t_idx in range(len(targets)):
-    #     targets[t_idx] = targets[t_idx].cpu().detach().numpy()
-    # # for t_idx in range(len(multi_targets[1])):
-    # #     multi_targets[1][t_idx] = multi_targets[1][t_idx].cpu().detach().numpy()
-    #
-    # multi_targets = [target, targets]
 
-    # print("Rearrange data by class...")
-    # data_by_class = rearrange_data_by_class(
-    #     mdata.cpu().detach().numpy(),
-    #     multi_targets,
-    #     SRC_N_CLASS
-    # )
     print("Rearrange data by class...")
-    data_by_class = rearrange_data_by_class(
-        dataset.data.cpu().detach().numpy(),
+    data_by_class1, data_by_class2 = rearrange_data_by_class(
+        dataset_data1.cpu().detach().numpy(),
+        dataset_data2.cpu().detach().numpy(),
         dataset.targets.cpu().detach().numpy(),
         SRC_N_CLASS
     )
-    print(f"{mode.upper()} SET:\n  Total #samples: {n_sample}. sample shape: {dataset.data[0].shape}")
-    print("  #samples per class:\n", [len(v) for v in data_by_class])
+    print(f"{mode.upper()} SET:\n  Total #samples: {n_sample}. sample shape: {dataset_data1[0].shape}")
+    print("  #samples per class:\n", [len(v) for v in data_by_class1])
 
-    return data_by_class, n_sample, SRC_N_CLASS
+    return data_by_class1, data_by_class2, n_sample, SRC_N_CLASS
 
 def sample_class(SRC_N_CLASS, NUM_LABELS, user_id, label_random=False):
     assert NUM_LABELS <= SRC_N_CLASS
@@ -79,7 +119,7 @@ def sample_class(SRC_N_CLASS, NUM_LABELS, user_id, label_random=False):
 
 
 # each client contains two class
-def divide_train_data(data, n_sample, SRC_CLASSES, NUM_USERS, min_sample, class_per_client=2):
+def divide_train_data(data1, data2, n_sample, SRC_CLASSES, NUM_USERS, min_sample, class_per_client=2):
     min_sample = 10#len(SRC_CLASSES) * min_sample
     min_size = 0 # track minimal samples per user
     ###### Determine Sampling #######
@@ -99,7 +139,7 @@ def divide_train_data(data, n_sample, SRC_CLASSES, NUM_USERS, min_sample, class_
                     selected_clients.append(client)
             selected_clients = selected_clients[:int(NUM_USERS / len(SRC_CLASSES) * class_per_client)]
 
-            num_all = len(data[l])
+            num_all = len(data1[l])
             num_clients_ = int(NUM_USERS/len(SRC_CLASSES)*class_per_client)
             num_per = num_all / num_clients_
             num_samples = np.random.randint(max(num_per/10, 16), num_per, num_clients_-1).tolist()
@@ -111,7 +151,7 @@ def divide_train_data(data, n_sample, SRC_CLASSES, NUM_USERS, min_sample, class_
 
             idx = 0
             # get indices for all that label
-            idx_l = [i for i in range(len(data[l]))]
+            idx_l = [i for i in range(len(data1[l]))]
             np.random.shuffle(idx_l)
             for client, num_sample in zip(selected_clients, num_samples):
                 idx_batch[client][l] = np.random.choice(idx_l, num_sample)
@@ -129,22 +169,25 @@ def divide_train_data(data, n_sample, SRC_CLASSES, NUM_USERS, min_sample, class_
         min_size = min(samples_per_user)
 
     ###### CREATE USER DATA SPLIT #######
-    X = [[] for _ in range(NUM_USERS)]
+    X1 = [[] for _ in range(NUM_USERS)]
+    X2 = [[] for _ in range(NUM_USERS)]
     y = [[] for _ in range(NUM_USERS)]
     Labels=[set() for _ in range(NUM_USERS)]
     print("processing users...")
     for u, user_idx_batch in enumerate(idx_batch):
         for l, indices in user_idx_batch.items():
             if len(indices) == 0: continue
-            X[u] += data[l][indices].tolist()
+            X1[u] += data1[l][indices].tolist()
+            X2[u] += data2[l][indices].tolist()
             y[u] += (l * np.ones(len(indices))).tolist()
             Labels[u].add(l)
 
-    return X, y, Labels, idx_batch, samples_per_user
+    return X1, X2, y, Labels, idx_batch, samples_per_user
 
-def divide_test_data(NUM_USERS, SRC_CLASSES, test_data, Labels, unknown_test):
+def divide_test_data(NUM_USERS, SRC_CLASSES, test_data1, test_data2, Labels, unknown_test):
     # Create TEST data for each user.
-    test_X = [[] for _ in range(NUM_USERS)]
+    test_X1 = [[] for _ in range(NUM_USERS)]
+    test_X2 = [[] for _ in range(NUM_USERS)]    
     test_y = [[] for _ in range(NUM_USERS)]
     idx = {l: 0 for l in SRC_CLASSES}
     for user in trange(NUM_USERS):
@@ -155,11 +198,12 @@ def divide_test_data(NUM_USERS, SRC_CLASSES, test_data, Labels, unknown_test):
         for l in user_sampled_labels:
             num_samples = int(len(test_data[l]) / NUM_USERS )
             assert num_samples + idx[l] <= len(test_data[l])
-            test_X[user] += test_data[l][idx[l]:idx[l] + num_samples].tolist()
+            test_X1[user] += test_data[l][idx[l]:idx[l] + num_samples].tolist()
+            test_X2[user] += test_data[l][idx[l]:idx[l] + num_samples].tolist()
             test_y[user] += (l * np.ones(num_samples)).tolist()
-            assert len(test_X[user]) == len(test_y[user]), f"{len(test_X[user])} == {len(test_y[user])}"
+            assert len(test_X1[user]) == len(test_y[user]), f"{len(test_X1[user])} == {len(test_y[user])}"
             idx[l] += num_samples
-    return test_X, test_y
+    return test_X1, test_X2, test_y
 
 def main():
     parser = argparse.ArgumentParser()
@@ -184,45 +228,23 @@ def main():
     # Setup directory for train/test data
     path_prefix = f'u{args.n_user}c{args.n_class}-class{args.class_per_client}'
 
-    def process_user_data(mode, data, n_sample, SRC_CLASSES, Labels=None, unknown_test=0):
+    def process_user_data(mode, data1, data2, n_sample, SRC_CLASSES, Labels=None, unknown_test=0):
         if mode == 'train':
-            X, y, Labels, idx_batch, samples_per_user  = divide_train_data(
-                data, n_sample, SRC_CLASSES, NUM_USERS, args.min_sample, args.class_per_client)
+            X1, X2, y, Labels, idx_batch, samples_per_user  = divide_train_data(
+                data1, data2, n_sample, SRC_CLASSES, NUM_USERS, args.min_sample, args.class_per_client)
         if mode == 'test':
             assert Labels != None or unknown_test
-            X, y = divide_test_data(NUM_USERS, SRC_CLASSES, data, Labels, unknown_test)
+            X1, X2, y = divide_test_data(NUM_USERS, SRC_CLASSES, data1, data2, Labels, unknown_test)
         dataset={'users': [], 'user_data': {}, 'num_samples': []}
         for i in range(NUM_USERS):
             uname='f_{0:05d}'.format(i)
             dataset['users'].append(uname)
 
-            # # re-label
-            # length = len(y[i])
-            # for label_idx in range(len(y[i])):
-            #     for class_idx in range(args.n_class):
-            #         if class_idx == y[i][label_idx]:
-            #             locals()['multi_label_' + str(class_idx)][label_idx] = 1
-            #         else:
-            #             locals()['multi_label_' + str(class_idx)][label_idx] = 0
-            # multi_y = []
-            # # multi_y.append(locals()['multi_label_' + str(class_idx)] for class_idx in range(args.n_class))
-            # multi_y.append(multi_label_0)
-            # multi_y.append(multi_label_1)
-            # multi_y.append(multi_label_2)
-            # multi_y.append(multi_label_3)
-            # multi_y.append(multi_label_4)
-            # multi_y.append(multi_label_5)
-            # multi_y.append(multi_label_6)
-            # multi_y.append(multi_label_7)
-            # multi_y.append(multi_label_8)
-            # multi_y.append(multi_label_9)
-            # dataset['user_data'][uname]={
-            #     'x': torch.tensor(X[i], dtype=torch.float32),
-            #     'y': torch.tensor(multi_y, dtype=torch.int64)}
             dataset['user_data'][uname] = {
-                'x': torch.tensor(X[i], dtype=torch.float32),
+                'x1': torch.tensor(X1[i], dtype=torch.float32),
+                'x2': torch.tensor(X2[i], dtype=torch.float32),
                 'y': torch.tensor(y[i], dtype=torch.int64)}
-            dataset['num_samples'].append(len(X[i]))
+            dataset['num_samples'].append(len(X1[i]))
 
         print("{} #sample by user:".format(mode.upper()), dataset['num_samples'])
 
@@ -257,13 +279,13 @@ def main():
 
 
     print(f"Reading source dataset.")
-    train_data, n_train_sample, SRC_N_CLASS = get_dataset(mode='train')
-    test_data, n_test_sample, SRC_N_CLASS = get_dataset(mode='test')
+    train_data1, train_data2, n_train_sample, SRC_N_CLASS = get_dataset(mode='train')
+    test_data1, test_data2, n_test_sample, SRC_N_CLASS = get_dataset(mode='test')
     SRC_CLASSES=[l for l in range(SRC_N_CLASS)]
     # random.shuffle(SRC_CLASSES)
     print("{} labels in total.".format(len(SRC_CLASSES)))
-    Labels, idx_batch, samples_per_user = process_user_data('train', train_data, n_train_sample, SRC_CLASSES)
-    process_user_data('test', test_data, n_test_sample, SRC_CLASSES, Labels=Labels, unknown_test=args.unknown_test)
+    Labels, idx_batch, samples_per_user = process_user_data('train', train_data1, train_data2, n_train_sample, SRC_CLASSES)
+    process_user_data('test', test_data1, test_data2, n_test_sample, SRC_CLASSES, Labels=Labels, unknown_test=args.unknown_test)
     print("Finish Generating User samples")
 
     for client in range(NUM_USERS):
